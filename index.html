@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <title>HOYTS: Empty Sessions Today</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+            :root {
+                font-family:
+                    system-ui,
+                    -apple-system,
+                    sans-serif;
+                color-scheme: light dark;
+            }
+            body {
+                max-width: 540px;
+                margin: 3rem auto;
+                padding: 0 1rem;
+            }
+            h1 {
+                font-size: 1.4rem;
+                margin-bottom: 0.25rem;
+            }
+            p.lede {
+                margin: 0 0 1.5rem;
+                opacity: 0.7;
+            }
+            form {
+                display: flex;
+                gap: 0.5rem;
+                flex-wrap: wrap;
+                margin-bottom: 1.5rem;
+            }
+            input {
+                padding: 0.55rem 0.75rem;
+                font-size: 1rem;
+                border: 1px solid #888;
+                border-radius: 6px;
+                background: transparent;
+                color: inherit;
+            }
+            input[name="state"] {
+                flex: 0 0 90px;
+                text-transform: uppercase;
+            }
+            input[name="location"] {
+                flex: 1 1 200px;
+            }
+            button {
+                padding: 0.55rem 1rem;
+                font-size: 1rem;
+                border: 0;
+                border-radius: 6px;
+                background: #d62027;
+                color: white;
+                cursor: pointer;
+            }
+            button:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+            #status {
+                margin-bottom: 1rem;
+                opacity: 0.7;
+            }
+            ul {
+                padding: 0;
+                list-style: none;
+            }
+            li {
+                padding: 0.65rem 0.25rem;
+                border-bottom: 1px solid #444;
+            }
+            .title {
+                font-weight: 600;
+            }
+            .times {
+                margin-top: 0.25rem;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.4rem;
+            }
+            .time {
+                font-size: 0.85rem;
+                padding: 0.2rem 0.55rem;
+                border: 1px solid #888;
+                border-radius: 4px;
+                text-decoration: none;
+                color: inherit;
+                display: inline-flex;
+                align-items: center;
+                gap: 0.4rem;
+            }
+            .time:hover {
+                background: rgba(214, 32, 39, 0.12);
+                border-color: #d62027;
+            }
+            .time--xtreme {
+                border-color: #d62027;
+            }
+            .badge {
+                font-size: 0.7rem;
+                font-weight: 600;
+                letter-spacing: 0.04em;
+                padding: 0.05rem 0.35rem;
+                border-radius: 3px;
+                background: #d62027;
+                color: white;
+            }
+            .empty {
+                opacity: 0.6;
+                font-style: italic;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>HOYTS: empty sessions today</h1>
+        <p class="lede">
+            Movies with at least one session where nobody has booked a seat yet.
+        </p>
+
+        <form id="form">
+            <input
+                name="state"
+                placeholder="State (e.g. QLD)"
+                required
+                autocomplete="off"
+            />
+            <input
+                name="location"
+                placeholder="Cinema (e.g. Redcliffe)"
+                required
+                autocomplete="off"
+            />
+            <button type="submit">Search</button>
+        </form>
+
+        <div id="status"></div>
+        <ul id="results"></ul>
+
+        <script>
+            const form = document.getElementById("form");
+            const statusEl = document.getElementById("status");
+            const results = document.getElementById("results");
+            const button = form.querySelector("button");
+
+            form.addEventListener("submit", async (e) => {
+                e.preventDefault();
+                const state = form.state.value.trim();
+                const location = form.location.value.trim();
+                if (!state || !location) return;
+
+                results.innerHTML = "";
+                statusEl.textContent = "Searching… this takes ~30 seconds.";
+                button.disabled = true;
+
+                try {
+                    const r = await fetch(
+                        `/api/search?state=${encodeURIComponent(state)}&location=${encodeURIComponent(location)}`,
+                    );
+                    const data = await r.json();
+                    if (!r.ok)
+                        throw new Error(data.error || `HTTP ${r.status}`);
+
+                    if (!data.movies?.length) {
+                        statusEl.textContent = "";
+                        results.innerHTML =
+                            '<li class="empty">No fully-empty sessions found today.</li>';
+                        return;
+                    }
+                    statusEl.textContent = `${data.movies.length} movie${data.movies.length === 1 ? "" : "s"}:`;
+                    results.innerHTML = data.movies
+                        .map(
+                            (m) => `
+                <li>
+                  <div class="title">${escapeHtml(m.title)}</div>
+                  <div class="times">${(m.sessions || [])
+                      .map(
+                          (s) => `
+                      <a class="time${s.xtremescreen ? " time--xtreme" : ""}"
+                         href="${escapeHtml(s.bookingUrl)}"
+                         target="_blank"
+                         rel="noopener">
+                        ${escapeHtml(s.time)}
+                        ${s.xtremescreen ? '<span class="badge">XTREME</span>' : ""}
+                      </a>`,
+                      )
+                      .join("")}</div>
+                </li>`,
+                        )
+                        .join("");
+                } catch (err) {
+                    statusEl.textContent = `Error: ${err.message}`;
+                } finally {
+                    button.disabled = false;
+                }
+            });
+
+            function escapeHtml(s) {
+                return String(s).replace(
+                    /[&<>"']/g,
+                    (c) =>
+                        ({
+                            "&": "&amp;",
+                            "<": "&lt;",
+                            ">": "&gt;",
+                            '"': "&quot;",
+                            "'": "&#39;",
+                        })[c],
+                );
+            }
+        </script>
+    </body>
+</html>
