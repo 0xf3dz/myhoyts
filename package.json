@@ -1,12 +1,9 @@
 {
-  "name": "hoyts-scraper",
+  "name": "myhoyts",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "scrape": "node scrape-hoyts.js"
-  },
-  "devDependencies": {
-    "playwright": "^1.49.0"
+    "start": "node server.js"
   }
 }

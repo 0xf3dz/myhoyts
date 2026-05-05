@@ -1,118 +1,67 @@
-// Lists today's movies whose sessions still have 100% of seats available
-// (i.e. nobody has booked yet) at the given cinema.
+// Lists today's sessions at a Hoyts cinema where no seats have been sold yet.
+// Uses Hoyts's public JSON APIs directly — no browser automation.
 //
 // Usage:
 //   node empty-sessions.js "QLD" "Redcliffe"
-//   node empty-sessions.js "NSW" "Broadway" --headed
 //
-// "100% available" means no seat has sold:true. Structurally unavailable seats
-// (e.g. permanently-blocked wheelchair-companion seats at some cinemas) are
-// reported separately but do not disqualify a session.
-
-import { chromium } from "playwright";
+// "No seats sold" means session.sold === 0. Permanently-blocked seats
+// (e.g. wheelchair-companion seats) are reported but don't disqualify.
 
 const args = process.argv.slice(2);
-const headed = args.includes("--headed");
-const positional = args.filter((a) => !a.startsWith("--"));
-const [stateArg, locationArg] = positional;
+const [stateArg, locationArg] = args;
 
 if (!stateArg || !locationArg) {
-  console.error('Usage: node empty-sessions.js "<state>" "<location>" [--headed]');
+  console.error('Usage: node empty-sessions.js "<state>" "<location>"');
   process.exit(1);
 }
 
 const VALID_STATES = ["ACT", "NSW", "QLD", "SA", "VIC", "WA"];
-const stateUpper = stateArg.toUpperCase();
-if (!VALID_STATES.includes(stateUpper)) {
+const STATE = stateArg.toUpperCase();
+if (!VALID_STATES.includes(STATE)) {
   console.error(`State must be one of: ${VALID_STATES.join(", ")}`);
   process.exit(1);
 }
 
-const SESSION_TIMES = "https://www.hoyts.com.au/session-times";
+const STATE_TZ = {
+  ACT: "Australia/Sydney",
+  NSW: "Australia/Sydney",
+  QLD: "Australia/Brisbane",
+  SA: "Australia/Adelaide",
+  VIC: "Australia/Melbourne",
+  WA: "Australia/Perth",
+};
+
+const log = process.stderr.isTTY ? (...a) => console.error(...a) : () => {};
+
+const API = "https://apim.hoyts.com.au/au/cinemaapi/api";
 const SEATS_API = (cinemaId, sessionId) =>
   `https://apim.hoyts.com.au/au/ticketing/api/v1/ticket/seats/${cinemaId}/${sessionId}/`;
+const HOYTS_BASE = "https://www.hoyts.com.au";
 
-const escapeRegex = (s) => s.replace(/[/\\^$.*+?()[\]{}|]/g, "\\$&");
-
-async function selectCinema(page, state, cinema) {
-  const trigger = page
-    .locator(".widget__subheading--button:visible, .sessions-alert__button:visible")
-    .first();
-  await trigger.waitFor({ state: "visible", timeout: 15_000 });
-  await trigger.click();
-
-  const modal = page.locator("#cinema-selection-modal");
-  await modal.locator(".modal__panel").first().waitFor({ state: "visible" });
-
-  const clear = modal.locator(".modal__clear-button");
-  if (await clear.isVisible().catch(() => false)) {
-    await clear.click().catch(() => {});
-    await page.waitForTimeout(250);
-  }
-
-  await modal.locator(".modal__tab-button", { hasText: new RegExp(`^${state}$`, "i") }).first().click();
-  await page.waitForTimeout(300);
-
-  const label = modal
-    .locator(".modal__item-label")
-    .filter({ hasText: new RegExp(`^\\s*${escapeRegex(cinema)}\\s*$`, "i") })
-    .first();
-
-  if (!(await label.count())) {
-    const available = await modal.locator(".modal__item-label").allInnerTexts();
-    throw new Error(
-      `Cinema "${cinema}" not in ${state}. Available: ${available.map((s) => s.trim()).filter(Boolean).join(", ")}`,
-    );
-  }
-  await label.click();
-  await page.waitForTimeout(300);
-  await modal.getByRole("button", { name: /save\s*&\s*browse/i }).first().click();
-  await modal.waitFor({ state: "hidden" }).catch(() => {});
+async function getJson(url) {
+  const r = await fetch(url, { headers: { accept: "application/json" } });
+  if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
+  return r.json();
 }
 
-async function extractTodayMovies(page) {
-  await page.waitForSelector("ul.movies-list li.movies-list__item, .sessions-alert__heading", {
-    timeout: 20_000,
-  });
-  return await page.evaluate(() => {
-    return Array.from(document.querySelectorAll("li.movies-list__item")).map((item) => {
-      const today = Array.from(item.querySelectorAll(".sessions")).find((b) =>
-        /^today\b/i.test(b.querySelector(".sessions__date")?.innerText.trim() || ""),
-      );
-      const sessions = today
-        ? Array.from(today.querySelectorAll("li.sessions__item"))
-            .map((li) => {
-              const a = li.querySelector("a.session");
-              const href = a?.getAttribute("href") || null;
-              if (!href) return null;
-              let cinemaId = null;
-              let sessionId = null;
-              try {
-                const u = new URL(href, "https://www.hoyts.com.au");
-                cinemaId = u.searchParams.get("cinemaId");
-                sessionId = u.searchParams.get("sessionId");
-              } catch {}
-              return {
-                time: li.querySelector(".session__time")?.innerText.trim().toUpperCase() || null,
-                attributes: Array.from(li.querySelectorAll(".session__attribute-name")).map((s) => s.innerText.trim()),
-                tags: Array.from(li.querySelectorAll(".session__tag")).map((s) => s.innerText.trim()),
-                cinemaId,
-                sessionId,
-                bookingUrl: href,
-              };
-            })
-            .filter(Boolean)
-        : [];
+function todayInTz(tz) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
 
-      return {
-        title: item.querySelector(".movies-list__heading")?.innerText.trim() || null,
-        movieUrl: item.querySelector(".movies-list__link")?.getAttribute("href") || null,
-        rating: item.querySelector(".rating")?.getAttribute("title") || null,
-        duration: item.querySelector(".movies-list__duration")?.innerText.trim() || null,
-        sessions,
-      };
-    });
-  });
+function findCinema(cinemas, state, query) {
+  const q = query.trim().toLowerCase();
+  const inState = cinemas.filter((c) => c.state === state);
+  return (
+    inState.find((c) => c.name.toLowerCase() === q) ||
+    inState.find((c) => c.slug?.toLowerCase() === q) ||
+    inState.find((c) => c.suburb?.toLowerCase() === q) ||
+    inState.find((c) => c.name.toLowerCase().includes(q))
+  );
 }
 
 function summarizeSeats(seatJson) {
@@ -140,12 +89,13 @@ function summarizeSeats(seatJson) {
   };
 }
 
-async function fetchSeats(request, cinemaId, sessionId) {
-  const resp = await request.get(SEATS_API(cinemaId, sessionId), {
-    headers: { accept: "application/json" },
-  });
-  if (!resp.ok()) throw new Error(`seats API ${resp.status()} for ${cinemaId}/${sessionId}`);
-  return await resp.json();
+function formatTime(localDateString) {
+  // session.date looks like "2026-05-05T19:15:00" in cinema-local time
+  const [, time] = localDateString.split("T");
+  const [hh, mm] = time.split(":").map(Number);
+  const h12 = hh === 0 ? 12 : hh > 12 ? hh - 12 : hh;
+  const ampm = hh >= 12 ? "PM" : "AM";
+  return `${h12}:${String(mm).padStart(2, "0")} ${ampm}`;
 }
 
 async function mapWithConcurrency(items, limit, fn) {
@@ -163,79 +113,84 @@ async function mapWithConcurrency(items, limit, fn) {
 }
 
 async function main() {
-  const browser = await chromium.launch({ headless: !headed });
-  const context = await browser.newContext({
-    viewport: { width: 1400, height: 1000 },
-    locale: "en-AU",
-    timezoneId: "Australia/Sydney",
-  });
-  const page = await context.newPage();
+  log(`→ Fetching cinemas + movies`);
+  const [cinemas, movies] = await Promise.all([
+    getJson(`${API}/cinemas`),
+    getJson(`${API}/movies`),
+  ]);
 
-  console.error(`→ Opening ${SESSION_TIMES}`);
-  await page.goto(SESSION_TIMES, { waitUntil: "domcontentloaded" });
-  await page.waitForLoadState("networkidle").catch(() => {});
+  const cinema = findCinema(cinemas, STATE, locationArg);
+  if (!cinema) {
+    const available = cinemas
+      .filter((c) => c.state === STATE)
+      .map((c) => c.name)
+      .join(", ");
+    throw new Error(
+      `Cinema "${locationArg}" not in ${STATE}. Available: ${available}`,
+    );
+  }
 
-  console.error(`→ Selecting ${stateUpper} / ${locationArg}`);
-  await selectCinema(page, stateUpper, locationArg);
-  await page.waitForLoadState("networkidle").catch(() => {});
+  const today = todayInTz(STATE_TZ[STATE]);
+  log(`→ ${cinema.name} (${cinema.id}) — ${today}`);
 
-  const movies = await extractTodayMovies(page);
-  const allSessions = movies.flatMap((m) =>
-    m.sessions
-      .filter((s) => s.cinemaId && s.sessionId)
-      .map((s) => ({ movieTitle: m.title, ...s })),
+  const sessions = await getJson(`${API}/sessions/${cinema.id}`);
+  const todayLive = sessions.filter(
+    (s) => s.date?.startsWith(today) && !s.disabled,
   );
+  log(`→ ${todayLive.length} live sessions today`);
 
-  console.error(`→ Checking seat availability for ${allSessions.length} sessions`);
-  const seatResults = await mapWithConcurrency(allSessions, 5, async (s) => {
+  const seatResults = await mapWithConcurrency(todayLive, 5, async (s) => {
     try {
-      const json = await fetchSeats(context.request, s.cinemaId, s.sessionId);
+      const json = await getJson(SEATS_API(cinema.id, s.id));
       return { ...s, seats: summarizeSeats(json) };
     } catch (err) {
       return { ...s, seats: null, error: err.message };
     }
   });
 
-  // Keep only sessions that are fully open, then group by movie.
+  const movieByVistaId = new Map(movies.map((m) => [m.vistaId, m]));
+
   const byMovie = new Map();
   for (const r of seatResults) {
     if (!r.seats?.fullyOpen) continue;
-    const m = movies.find((mm) => mm.title === r.movieTitle);
-    if (!byMovie.has(r.movieTitle)) {
-      byMovie.set(r.movieTitle, {
-        title: m.title,
-        movieUrl: m.movieUrl,
-        rating: m.rating,
-        duration: m.duration,
+    const mv = movieByVistaId.get(r.movieId);
+    if (!byMovie.has(r.movieId)) {
+      byMovie.set(r.movieId, {
+        title: mv?.name || r.movieId,
+        movieUrl: mv?.link ? `${HOYTS_BASE}${mv.link}` : null,
+        rating: mv?.rating?.id || null,
+        duration: mv?.duration ? `${mv.duration} min` : null,
         sessions: [],
       });
     }
-    byMovie.get(r.movieTitle).sessions.push({
-      time: r.time,
-      attributes: r.attributes,
-      tags: r.tags,
-      cinemaId: r.cinemaId,
-      sessionId: r.sessionId,
-      bookingUrl: r.bookingUrl,
+    const link = r.link || `/orders/tickets?cinemaId=${cinema.id}&sessionId=${r.id}`;
+    byMovie.get(r.movieId).sessions.push({
+      time: formatTime(r.date),
+      attributes: r.originalTags || [],
+      tags: r.typeId === "XTREME" ? ["XtremeScreen"] : [],
+      cinemaId: cinema.id,
+      sessionId: r.id,
+      bookingUrl: link.startsWith("http") ? link : `${HOYTS_BASE}${link}`,
       seats: r.seats,
     });
   }
 
   const output = {
     scrapedAt: new Date().toISOString(),
-    date: new Date().toISOString().slice(0, 10),
-    state: stateUpper,
+    date: today,
+    state: STATE,
     location: locationArg,
+    cinemaId: cinema.id,
+    cinemaName: cinema.name,
     criterion: "no seats sold (sold === 0)",
     movieCount: byMovie.size,
     movies: [...byMovie.values()],
   };
 
   console.log(JSON.stringify(output, null, 2));
-  await browser.close();
 }
 
 main().catch((err) => {
-  console.error("Failed:", err);
+  console.error("Failed:", err.message);
   process.exit(1);
 });

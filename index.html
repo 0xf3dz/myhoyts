@@ -114,10 +114,8 @@
         </style>
     </head>
     <body>
-        <h1>HOYTS: empty sessions today</h1>
-        <p class="lede">
-            Movies with at least one session where nobody has booked a seat yet.
-        </p>
+        <h1>Have the cinema to yourself</h1>
+        <p class="lede">Live list of HOYTS sessions with zero bookings.</p>
 
         <form id="form">
             <input
@@ -151,7 +149,7 @@
                 if (!state || !location) return;
 
                 results.innerHTML = "";
-                statusEl.textContent = "Searching… this takes ~30 seconds.";
+                statusEl.textContent = "Searching…";
                 button.disabled = true;
 
                 try {
